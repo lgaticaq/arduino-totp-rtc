@@ -1,6 +1,6 @@
-# TotpRtc
+# totp-rtc
 
-Example TOTP + RTC using Arduino
+Example TOTP + RTC in Arduino
 
 ## Libraries
 
