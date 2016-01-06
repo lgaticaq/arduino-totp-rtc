@@ -1,9 +1,9 @@
-#include "Wire.h"
-#include "RTClib.h"
-// #include "swRTC.h"
-#include "Keypad.h"
-#include "sha1.h"
-#include "TOTP.h"
+#include <Wire.h>
+#include <RTClib.h>
+// #include <swRTC.h>
+#include <Keypad.h>
+#include <sha1.h>
+#include <TOTP.h>
 
 // debug print, use #define DEBUG to enable Serial output
 // thanks to http://forum.arduino.cc/index.php?topic=46900.0
@@ -29,8 +29,8 @@ char keys[ROWS][COLS] = {
   {'7','8','9','C'},
   {'*','0','#','D'}
 };
-byte rowPins[ROWS] = {9,8,7,6}; // pins from 9 to 6
-byte colPins[COLS] = {5,4,3,2}; // pins from 5 to 2
+byte rowPins[ROWS] = {12,11,10,9}; // pins from 12 to 9
+byte colPins[COLS] = {8,7,6,5}; // pins from 8 to 5
 Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS );
 
 RTC_DS1307 rtc;
@@ -41,35 +41,17 @@ int inputCode_idx;
 
 boolean doorOpen;
 
-int ledError = 13;
-int ledDoor = 12;
+int ledError = 2;
+int ledDoor = 3;
+int output = 13;
 
 void setup() {
-  if (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
-    while(1);
-  }
-
-  if (!rtc.isrunning()) {
-    Serial.println("RTC is NOT running!");
-    // following line sets the RTC to the date & time this sketch was compiled
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    // This line sets the RTC with an explicit date & time, for example to set
-    // January 21, 2014 at 3am you would call:
-    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
-  }
-
   Serial.begin(9600);
+  Wire.begin();
+  rtc.begin();
 
   DEBUG_PRINTLN("TOTP Door lock");
   DEBUG_PRINTLN("");
-
-  // // init software RTC with the current time
-  // rtc.stopRTC();
-  // rtc.setDate(21, 10, 2015);
-  // rtc.setTime(17, 41, 00);
-  // rtc.startRTC();
-  // DEBUG_PRINTLN("RTC initialized and started");
 
   // reset input buffer index
   inputCode_idx = 0;
@@ -83,21 +65,6 @@ void setup() {
 }
 
 void loop () {
-  // DateTime now = rtc.now();
-  // Serial.print(now.year(), DEC);
-  // Serial.print('/');
-  // Serial.print(now.month(), DEC);
-  // Serial.print('/');
-  // Serial.print(now.day(), DEC);
-  // Serial.print(' ');
-  // Serial.print(now.hour(), DEC);
-  // Serial.print(':');
-  // Serial.print(now.minute(), DEC);
-  // Serial.print(':');
-  // Serial.print(now.second(), DEC);
-  // Serial.println();
-  // delay(1000);
-
   char key = keypad.getKey();
 
   // a key was pressed
@@ -144,17 +111,18 @@ void loop () {
 
         // code is ok :)
         if(strcmp(inputCode, totpCode) == 0) {
-          digitalWrite(ledError, LOW);
 
           if(doorOpen == true) DEBUG_PRINTLN("Code ok but the door is already open");
 
           else {
             DEBUG_PRINTLN("Code ok, opening the door...");
             digitalWrite(ledDoor, HIGH);
+            digitalWrite(output, HIGH);
             doorOpen = true;
-            delay(10000);
+            delay(15000);
             DEBUG_PRINTLN("Time out, closing the door...");
             digitalWrite(ledDoor, LOW);
+            digitalWrite(output, LOW);
             doorOpen = false;
           }
 
@@ -163,6 +131,8 @@ void loop () {
           DEBUG_PRINT("Wrong code... the correct was: ");
           DEBUG_PRINTLN(totpCode);
           digitalWrite(ledError, HIGH);
+          delay(2000);
+          digitalWrite(ledError, LOW);
         }
       }
     }
