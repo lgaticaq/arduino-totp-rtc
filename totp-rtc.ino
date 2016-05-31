@@ -1,20 +1,13 @@
 #include <Wire.h>
-#include <RTClib.h>
-// #include <swRTC.h>
+#if defined(ESP8266)
+#include <pgmspace.h>
+#else
+#include <avr/pgmspace.h>
+#endif
+#include <RtcDS3231.h>
 #include <Keypad.h>
 #include <sha1.h>
 #include <TOTP.h>
-
-// debug print, use #define DEBUG to enable Serial output
-// thanks to http://forum.arduino.cc/index.php?topic=46900.0
-#define DEBUG
-#ifdef DEBUG
-  #define DEBUG_PRINT(x)  Serial.print(x)
-  #define DEBUG_PRINTLN(x)  Serial.println(x)
-#else
-  #define DEBUG_PRINT(x)
-  #define DEBUG_PRINTLN(x)
-#endif
 
 // shared secret is arduinouno
 uint8_t hmacKey[] = {0x61, 0x72, 0x64, 0x75, 0x69, 0x6e, 0x6f, 0x75, 0x6e, 0x6f};
@@ -29,42 +22,112 @@ char keys[ROWS][COLS] = {
   {'7','8','9','C'},
   {'*','0','#','D'}
 };
-byte rowPins[ROWS] = {12,11,10,9}; // pins from 12 to 9
-byte colPins[COLS] = {8,7,6,5}; // pins from 8 to 5
-Keypad keypad = Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS );
+byte rowPins[ROWS] = {11,10,9,8};
+byte colPins[COLS] = {7,6,5,4};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-RTC_DS1307 rtc;
-// swRTC rtc;
+RtcDS3231 Rtc;
 char* totpCode;
 char inputCode[7];
 int inputCode_idx;
 
 boolean doorOpen;
+boolean ledErrorActive = false;
+boolean ledOkActive = false;
 
-int ledError = 2;
+int ledError = 12;
+int ledOk = 13;
 int ledDoor = 3;
-int output = 13;
+int countError = 0;
+int countOk = 0;
+int countDoor = 0;
+int limitDoor = 300;
+int limitLed = 100;
 
 void setup() {
-  Serial.begin(9600);
-  Wire.begin();
-  rtc.begin();
+  Serial.begin(57600);
 
-  DEBUG_PRINTLN("TOTP Door lock");
-  DEBUG_PRINTLN("");
+  //--------RTC SETUP ------------
+  Rtc.Begin();
+  RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
+
+  if (!Rtc.IsDateTimeValid()) {
+    // Common Cuases:
+    //   1) first time you ran and the device wasn't running yet
+    //   2) the battery on the device is low or even missing
+    Serial.println("RTC lost confidence in the DateTime!");
+    // following line sets the RTC to the date & time this sketch was compiled
+    // it will also reset the valid flag internally unless the Rtc device is
+    // having an issue
+    Rtc.SetDateTime(compiled);
+  }
+
+  if (!Rtc.GetIsRunning()) {
+    Serial.println("RTC was not actively running, starting now");
+    Rtc.SetIsRunning(true);
+  }
+
+  RtcDateTime now = Rtc.GetDateTime();
+  if (now < compiled) {
+    Serial.println("RTC is older than compile time!  (Updating DateTime)");
+    Rtc.SetDateTime(compiled);
+  } else if (now > compiled) {
+    Serial.println("RTC is newer than compile time. (this is expected)");
+  } else if (now == compiled) {
+    Serial.println("RTC is the same as compile time! (not expected but all is fine)");
+  }
+
+  // never assume the Rtc was last configured by you, so
+  // just clear them to your needed state
+  Rtc.Enable32kHzPin(false);
+  Rtc.SetSquareWavePin(DS3231SquareWavePin_ModeNone);
 
   // reset input buffer index
   inputCode_idx = 0;
 
   // close the door
   doorOpen = false;
-  DEBUG_PRINTLN("Door closed");
 
+  pinMode(ledOk, OUTPUT);
   pinMode(ledError, OUTPUT);
   pinMode(ledDoor, OUTPUT);
 }
 
 void loop () {
+  if (!Rtc.IsDateTimeValid()) {
+    // Common Cuases:
+    //   1) the battery on the device is low or even missing and the power line was disconnected
+    Serial.println("RTC lost confidence in the DateTime!");
+  }
+
+  // counter as delay
+  if (doorOpen == true) {
+    if (countDoor > limitDoor) {
+      digitalWrite(ledDoor, LOW);
+      doorOpen = false;
+      countDoor = 0;
+    }
+    countDoor++;
+  }
+
+  if (ledErrorActive == true) {
+    if (countError > limitLed) {
+      digitalWrite(ledError, LOW);
+      ledErrorActive = false;
+      countError = 0;
+    }
+    countError++;
+  }
+
+  if (ledOkActive == true) {
+    if (countOk > limitLed) {
+      digitalWrite(ledOk, LOW);
+      ledOkActive = false;
+      countOk = 0;
+    }
+    countOk++;
+  }
+
   char key = keypad.getKey();
 
   // a key was pressed
@@ -72,69 +135,54 @@ void loop () {
 
     // # resets the input buffer
     if(key == '#') {
-      DEBUG_PRINTLN("# pressed, resetting the input buffer...");
       inputCode_idx = 0;
-    }
-
-    // * closes the door
-    else if(key == '*') {
-
-      if(doorOpen == false) DEBUG_PRINTLN("* pressed but the door is already closed");
-
-      else {
-
-        DEBUG_PRINTLN("* pressed, closing the door...");
+    } else if (key == '*') {
+      // * closes the door
+      if (doorOpen == true) {
         digitalWrite(ledDoor, LOW);
         doorOpen = false;
       }
-    }
-    else {
-
+    } else {
       // save key value in input buffer
       inputCode[inputCode_idx++] = key;
 
       // if the buffer is full, add string terminator, reset the index
       // get the actual TOTP code and compare to the buffer's content
-      if(inputCode_idx == 6) {
-
+      if (inputCode_idx == 6) {
         inputCode[inputCode_idx] = '\0';
         inputCode_idx = 0;
-        // DEBUG_PRINT("New code inserted: ");
-        // DEBUG_PRINTLN(inputCode);
 
-        // long GMT = rtc.getTimestamp();
-        DateTime now = rtc.now();
-        long GMT = now.unixtime();
+        RtcDateTime now = Rtc.GetDateTime();
+        long GMT = now.Epoch32Time();
         totpCode = totp.getCode(GMT);
-        // DEBUG_PRINT("New code generate: ");
-        // DEBUG_PRINTLN(totpCode);
 
-        // code is ok :)
-        if(strcmp(inputCode, totpCode) == 0) {
-
-          if(doorOpen == true) DEBUG_PRINTLN("Code ok but the door is already open");
-
-          else {
-            DEBUG_PRINTLN("Code ok, opening the door...");
-            digitalWrite(ledDoor, HIGH);
-            digitalWrite(output, HIGH);
-            doorOpen = true;
-            delay(15000);
-            DEBUG_PRINTLN("Time out, closing the door...");
-            digitalWrite(ledDoor, LOW);
-            digitalWrite(output, LOW);
-            doorOpen = false;
+        if (strcmp(inputCode, totpCode) == 0) {
+          // code is ok :)
+          if (ledErrorActive == true) {
+            digitalWrite(ledError, LOW);
+            ledErrorActive = false;
           }
 
-        // code is wrong :(
+          digitalWrite(ledOk, HIGH);
+          ledOkActive = true;
+
+          if (doorOpen == false) {
+            digitalWrite(ledDoor, HIGH);
+            doorOpen = true;
+          }
         } else {
-          DEBUG_PRINT("Wrong code... the correct was: ");
-          DEBUG_PRINTLN(totpCode);
+          // code is wrong :(
+          if (ledOkActive == true) {
+            digitalWrite(ledOk, LOW);
+            ledOkActive = false;
+          }
+
           digitalWrite(ledError, HIGH);
-          delay(2000);
-          digitalWrite(ledError, LOW);
+          ledErrorActive = true;
         }
       }
     }
   }
+
+  delay(100);
 }
